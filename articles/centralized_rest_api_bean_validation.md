@@ -112,9 +112,9 @@ in detail in the following links:
 * http://docs.oracle.com/javaee/7/api/javax/ws/rs/NameBinding.html
 * http://docs.oracle.com/javaee/7/api/javax/interceptor/InterceptorBinding.html
 
-This minimalistic approach now ???liefert?? gets us a response with HTTP-errorcode 500 ("Internal Server error") with
-the textual error message of the exception. But this information helps us only ???bedingt???, but we ???immerhin??? have
-a centralized solution with the stacktrace.
+This minimalistic approach provides us now a response with HTTP-errorcode 500 ("Internal Server error") with the textual
+error message of the exception. But this information is only of limited help, but after all we have a centralized
+solution with the stacktrace.
  
 **Note:** The stacktrace is important for debugging. So, of course, we can log the exception to an error-log in the catch
 clause.

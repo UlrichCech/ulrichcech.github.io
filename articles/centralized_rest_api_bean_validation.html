@@ -139,9 +139,9 @@ public class UsersResource {
                 <li><a href="http://docs.oracle.com/javaee/7/api/javax/ws/rs/NameBinding.html">http://docs.oracle.com/javaee/7/api/javax/ws/rs/NameBinding.html</a></li>
                 <li><a href="http://docs.oracle.com/javaee/7/api/javax/interceptor/InterceptorBinding.html">http://docs.oracle.com/javaee/7/api/javax/interceptor/InterceptorBinding.html</a></li>
             </ul>
-            <p>This minimalistic approach now ???liefert?? gets us a response with HTTP-errorcode 500 (&quot;Internal Server error&quot;) with
-                the textual error message of the exception. But this information helps us only ???bedingt???, but we ???immerhin??? have
-                a centralized solution with the stacktrace.</p>
+            <p>This minimalistic approach provides us now a response with HTTP-errorcode 500 (&quot;Internal Server error&quot;) with the textual
+                error message of the exception. But this information is only of limited help, but after all we have a centralized
+                solution with the stacktrace.</p>
             <p><strong>Note:</strong> The stacktrace is important for debugging. So, of course, we can log the exception to an error-log in the catch
                 clause.</p>
             <p>On the server-side, we need to deal with exceptions, which cannot be handled by our ExceptionInterceptor. These could be
