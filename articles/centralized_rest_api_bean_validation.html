@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en-us">
+    <head>
+        <meta charset="UTF-8">
+        <title>Ulrich's Developer Blog</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" type="text/css" href="../stylesheets/normalize.css" media="screen">
+        <link href='https://fonts.googleapis.com/css?family=Open+Sans:400,700' rel='stylesheet' type='text/css'>
+        <link rel="stylesheet" type="text/css" href="../stylesheets/stylesheet.css" media="screen">
+        <link rel="stylesheet" type="text/css" href="../stylesheets/github-light.css" media="screen">
+
+    </head>
+
+    <body>
+        <section class="page-header">
+            <h1 class="project-name">Ulrich's Developer Blog</h1>
+            <h2 class="project-tagline"></h2>
+            <!--<a href="https://github.com/UlrichCech" class="btn">View on GitHub</a>-->
+            <!--<a href="https://github.com/UlrichCech/javaee-mongo-morphia/zipball/master" class="btn">Download .zip</a>-->
+            <!--<a href="https://github.com/UlrichCech/javaee-mongo-morphia/tarball/master" class="btn">Download .tar.gz</a>-->
+        </section>
+
+        <section style="float: right; min-width: 300px; max-width: 300px; margin-left:50px; margin-right: 50px; font-size: small;">
+            <ul>
+                <li><a href="../index.html">Home-Page</a></li>
+                <li>2015</li>
+                <ul>
+                    <li>August</li>
+                    <ul>
+                        <li><a href="centralized_rest_api_bean_validation.html">Centralized REST-API exception handling with BeanValidation</a></li>
+                    </ul>
+                </ul>
+                <li>2016</li>
+                <ul>
+                    <li>July</li>
+                    <ul>
+                        <li><a href="../articles/jmm-article-part1.html">JavaEE7 with MongoDB and Morphia (Part 1)</a></li>
+                    </ul>
+                </ul>
+            </ul>
+        </section>
+
+        <section class="main-content">
+
+            <h1><a href="#centralized-rest-api-exception-handling-with-beanvalidation" id="centralized-rest-api-exception-handling-with-beanvalidation" name="centralized-rest-api-exception-handling-with-beanvalidation"><span class="octicon octicon-link"></span>Centralized REST-API exception handling with BeanValidation</a></h1>
+            <p>by Ulrich Cech</p>
+            <h2><a href="#initiation" id="initiation" name="initiation"><span class="octicon octicon-link"></span>Initiation</a></h2>
+            <p>In a REST API, the exception handling is very important. On the one hand we do not want to show the API-user meaningless
+                stack traces or the default error page from the Application Server. Besides, it is also a security risk to give a stack
+                trace outwards, as this publishes numerous internal implementation details, which makes an attack significantly easier.
+                Secondly, the REST API is also used by other programming languages beside Java, and the respective developers
+                can't/don't want to have to interpret any Java stack trace.</p>
+            <p>For this we want to provide meaningful and even evaluable errors, which simplify the use of the REST API and thus also
+                lead to a higher acceptance and usability of the individual REST API. This means that we want to provide correct and
+                appropriate HTTP status codes as well as a uniform error data structure. This structure can also be processed by
+                machines, e.g. with automatic status queries.</p>
+            <p>In this article, I want to introduce a solution, how to build a centralized exception handling for a REST API, which is
+                coupled with BeanValidation. I use exclusively the JavaEE7 standard (JAX-RS, JAXB for serialization in XML or JSON,
+                etc.), so no additional libraries are required.</p>
+            <h2><a href="#centralized-exception-handling" id="centralized-exception-handling" name="centralized-exception-handling"><span class="octicon octicon-link"></span>Centralized Exception Handling</a></h2>
+            <p>First of all, we have to investigate where an exception can occur in our code. Potentially, this can happen anywhere,
+                because we have to take into account the CheckedExceptions and additionally any RuntimeExceptions, which can also be
+                thrown in Third Party libraries and which penetrate our code. We are aware of the CheckedExceptions by the compiler; but
+                we could find out the RuntimeExceptions only by analysis of each method, even by Third Libraries. Of course we don't want
+                to put &quot;try / catch blocks&quot; all around or at least in any REST API endpoint method. This leads to boilerplate code, thus
+                reducing the readability and maintainability. The following example shows this very clearly:</p>
+            <pre><code class="java">@RequestScoped
+@Path(&quot;users&quot;)
+public class UsersResource {
+
+    @Inject
+    UserRepository userRepository;
+
+    @POST
+    public Response registerUser(User userRequest) {
+        // try {
+            User managedUser = userRepository.register(userRequest);
+            URI uri = super.info.getAbsolutePathBuilder()
+                    .path(&quot;/&quot; + managedUser.getEmail()).build();
+            return Response.created(uri).entity(managedUser).build();
+        // } catch (Exception ex) {
+        //     if (ex instanceof ExceptionA) {
+        //         return &lt;X&gt;;
+        //     }
+        //     if (ex instanceof ExceptionB) {
+        //         return &lt;Y&gt;;
+        //     }
+        //     usw.
+        // }
+    }
+}
+</code></pre>
+            <p>We would need to implement the deactivated code in each method, whereby we would also violate the DRY principle (Do not
+                Repeat Yourself), what we have to avoid as good developers.</p>
+            <p>Even if there is only one catch-block or one error situation to handle, the code which deals with the exception handling
+                is much more than the functional code, which is only 3 lines.</p>
+            <p>Fortunately at this point, JavaEE has already suitable mechanisms to treat the exception handling at a central location:</p>
+            <ul>
+                <li>Interceptors</li>
+                <li>ExceptionMapper</li>
+            </ul>
+            <p>A central, but minimalistic ExceptionInterceptor for HTTP-error code 500 (Internal server error), which returns the
+                textual error message of this error, could have the following structure:</p>
+            <pre><code class="java">public class APIExceptionInterceptor {
+
+    @AroundInvoke
+    public Object handleException(InvocationContext context) {
+        Object proceedResponse;
+        try {
+            proceedResponse = context.proceed();
+        } catch (Exception ex) {
+            return Response.serverError().entity(ex.getMessage()).build();
+        }
+        return proceedResponse;
+    }
+}
+</code></pre>
+            <p>The Interceptor in all the REST resource classes is enabled through the <code>@Interceptor</code> annotation at class level . When
+                calling a REST method, the handleException()-method is called first, which then launches the code of the REST-method via
+                the line <code>proceedResponse = context.proceed();</code>. If now an exception is thrown during execution, it will be processed by
+                the &quot;catch&quot; block of the handleException()-method:</p>
+            <pre><code class="java">@RequestScoped
+@Path(&quot;users&quot;)
+@Interceptor(APIExceptionInterceptor.class)  // &lt;--- added interceptor annotation
+public class UsersResource {
+   // ...
+}
+</code></pre>
+            <p><strong>Note:</strong> If we need more than one interceptor, they could be defined via the
+                annotation<code>@Interceptors({APIExceptionInterceptor.class, B.class, C.class})</code>, which takes a list of interceptor classes.
+                In addition, interceptors can be provided not only on class-level, but also on method-level. This is useful, if we need
+                some fine-grained control of the execution of interceptors.<br />
+                But, we want to handle exceptions on every method, so we need the class-level-annotation. And more important, our
+                ExceptionInterceptor whould be mentioned first in the list if interceptors in the <code>@Interceptors</code>annotation, because
+                then we can handle exceptions, which can occur in other interceptors, as well.</p>
+            <p>Finally, we can define interceptors a little bit more elegant via Name-Binding/Interceptor-Binding, which is described
+                in detail in the following links:</p>
+            <ul>
+                <li><a href="http://docs.oracle.com/javaee/7/api/javax/ws/rs/NameBinding.html">http://docs.oracle.com/javaee/7/api/javax/ws/rs/NameBinding.html</a></li>
+                <li><a href="http://docs.oracle.com/javaee/7/api/javax/interceptor/InterceptorBinding.html">http://docs.oracle.com/javaee/7/api/javax/interceptor/InterceptorBinding.html</a></li>
+            </ul>
+            <p>This minimalistic approach now ???liefert?? gets us a response with HTTP-errorcode 500 (&quot;Internal Server error&quot;) with
+                the textual error message of the exception. But this information helps us only ???bedingt???, but we ???immerhin??? have
+                a centralized solution with the stacktrace.</p>
+            <p><strong>Note:</strong> The stacktrace is important for debugging. So, of course, we can log the exception to an error-log in the catch
+                clause.</p>
+            <p>On the server-side, we need to deal with exceptions, which cannot be handled by our ExceptionInterceptor. These could be
+                exceptions, which are thrown by the JAX-RS-framework before the HTTP-request reaches our Resource-class. In more detail,
+                this could be some of the following exceptions:</p>
+            <ul>
+                <li><code>javax.ws.rs.NotFoundException</code></li>
+                <li><code>javax.ws.rs.NotAcceptableException</code></li>
+                <li><code>javax.ws.rs.NotSupportedException</code></li>
+                <li>...</li>
+            </ul>
+            <p>In the package <code>javax.ws.rs</code>, there are some more exceptions, which should be handled accordingly, but we let them out
+                for clarity.</p>
+            <p>Ok, now we want to handle these exceptions and process them the same way as our <code>APIExceptionInterceptor</code>, so that we
+                can return a status-code and the error-message of the exception as well. For this, we use the
+                <code>javax.ws.rs.ext.ExceptionMapper</code>-interface. This generic interface could be implemented the following way:</p>
+            <pre><code class="java">import javax.ws.rs.NotFoundException;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.ext.ExceptionMapper;
+import javax.ws.rs.ext.Provider;
+
+@Provider
+public class JAXRSNotFoundMapper implements ExceptionMapper&lt;NotFoundException&gt; {
+
+    @Override
+    public Response toResponse(NotFoundException ex) {
+        return Response.status(Response.Status.NOT_FOUND)
+                .entity(ex.getMessage()).build();
+    }
+}
+</code></pre>
+            <pre><code class="java">import javax.ws.rs.NotAcceptableException;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.ext.ExceptionMapper;
+import javax.ws.rs.ext.Provider;
+
+@Provider
+public class JAXRSNotAcceptableMapper implements ExceptionMapper&lt;NotAcceptableException&gt; {
+
+    @Override
+    public Response toResponse(NotAcceptableException ex) {
+        return Response.status(Response.Status.NOT_ACCEPTABLE)
+                .entity(ex.getMessage()).build();
+    }
+}
+</code></pre>
+            <p>All the other exceptions (e.g. <code>javax.ws.rs.NotSupportedException</code>) could be handled by an ExceptionMapper like the one
+                before.</p>
+            <p>With the annotation <code>@Provider</code> these mappers are registered automatically at server startup. So you need not to
+                register them in some XML-configuration file (like web.xml) anymore.</p>
+            <p>The ExceptionMappers do not work globally in the WebApplication. They only catch exceptions for URIs, which are below the
+                Base-URI of the JAX-RS-Application. This URI is configured here:</p>
+            <pre><code class="java">import javax.ws.rs.ApplicationPath;
+import javax.ws.rs.core.Application;
+
+@ApplicationPath(&quot;/api&quot;)
+public class JAXRSConfiguration extends Application {
+}
+</code></pre>
+            <p>Now, this means, that the ExceptionMapper work for all URIs below <code>/api/</code>. In our example, we have currently only one
+                UsersResource with the following path:<br />
+                http://<server>:<port>/<context>/api/users</p>
+            <p>For example, if we would request the resource <code>http://&lt;server&gt;:&lt;port&gt;/&lt;context&gt;/api/accounts</code>, which currently does not
+                exists, then the server would produce a <code>NotFoundException</code>, which in turn would be caught and processed by our
+                ExceptionMapper... exactly, want we want the application to behave.</p>
+            <h3><a href="#milestone-1" id="milestone-1" name="milestone-1"><span class="octicon octicon-link"></span>Milestone 1</a></h3>
+            <p>We are now in the position to catch and handle all kinds of exceptions, which are thrown elsewhere in our application.
+                For this, we use the ExceptionInterceptors, and the ExceptionMappers for the exceptions, which the JAX-RS-framework
+                throws. The interceptors and mappers generate a uniformly result (HTTP-statuscode and error-text of the exception).</p>
+            <h2><a href="#converting-the-exceptions-in-a-uniform-response-structure" id="converting-the-exceptions-in-a-uniform-response-structure" name="converting-the-exceptions-in-a-uniform-response-structure"><span class="octicon octicon-link"></span>Converting the exceptions in a uniform response structure</a></h2>
+            <p>In the last section, we took care about catching potentially all thrown exceptions. Next, we need to transfer the
+                exceptions into a uniformly API-response-structure with all necessary information, so that the user can deal with this
+                error response in an appropriate way. At the moment, our ExceptionInterceptor would return &quot;Internal Server Error. File
+                not found&quot;... this is not really helpful.
+                Although we have a corresponding HTTP-statuscode in our mappers (404 for NotFound, 415 for UnsupportedMediaType ...),
+                this is not fine-grained enough for a real business application.
+                For that, we define our response structure, which we like to return. We want to provide the following information:</p>
+            <ul>
+                <li>HTTP-Status</li>
+                <li>business error code</li>
+                <li>business error message (localized)</li>
+            </ul>
+            <p>The error-object could be defined the following way (we use JAXB-entities for flexibility, so we can provide a response
+                in XML or JSON out of the box):</p>
+            <pre><code class="java">import javax.ws.rs.core.Response;
+import javax.xml.bind.annotation.XmlAccessType;
+import javax.xml.bind.annotation.XmlAccessorType;
+import javax.xml.bind.annotation.XmlRootElement;
+import javax.xml.bind.annotation.XmlType;
+import javax.xml.bind.annotation.adapters.XmlJavaTypeAdapter;
+import java.util.Locale;
+import java.util.ResourceBundle;
+
+@XmlRootElement
+@XmlAccessorType(XmlAccessType.FIELD)
+@XmlType(propOrder={&quot;status&quot;, &quot;errorCode&quot;, &quot;message&quot;})
+public class APIErrorResponse {
+
+    @XmlJavaTypeAdapter(ResponseStatusAdapter.class)
+    private Response.Status status;
+    private String errorCode;
+    private String message;
+
+    public APIErrorResponse() {}
+
+    public APIErrorResponse(APIError apiError, Locale locale) {
+        this.status = apiError.getStatus();
+        this.errorCode = apiError.getErrorCode();
+        this.message = getLocalizedMessage(apiError, locale);
+    }
+
+    public APIErrorResponse(Exception exception, Locale locale) {
+        this.status = Response.Status.INTERNAL_SERVER_ERROR;
+        this.errorCode = &quot;0&quot;;
+        this.message = exception.getLocalizedMessage();
+    }
+
+    public APIErrorResponse(Response.Status status,
+                            String errorCode,
+                            String messageKey,
+                            Locale locale) {
+        this.status = status;
+        this.errorCode = errorCode;
+        this.message = getLocalizedMessage(messageKey, locale);
+    }
+
+
+    public String getErrorCode() {
+        return this.errorCode;
+    }
+
+    public Response.Status getStatus() {
+        return status;
+    }
+
+    public String getMessage() {
+        return this.message;
+    }
+
+
+    private String getLocalizedMessage(APIError apiError,
+                                       Locale locale) {
+        ResourceBundle resourceBundle =
+                ResourceBundle.getBundle(apiError.getClass().getName(), locale);
+        return resourceBundle.getString(apiError.getMessageKey());
+    }
+
+    private String getLocalizedMessage(String messageKey,
+                                       Locale locale) {
+        ResourceBundle resourceBundle =
+                ResourceBundle.getBundle(getClass().getName(), locale);
+        return resourceBundle.getString(messageKey);
+    }
+
+}
+</code></pre>
+            <p><strong>Note:</strong> What's behind <code>APIError</code> is discussed in a second.</p>
+            <p>The <code>ResponseStatusAdapter</code> only converts the <code>javax.ws.rs.core.Response.Status</code> at the point of serializing the
+                HTTP-response into a String:</p>
+            <pre><code class="java">import javax.ws.rs.core.Response;
+import javax.xml.bind.annotation.adapters.XmlAdapter;
+
+public class ResponseStatusAdapter extends XmlAdapter&lt;String, Response.Status&gt; {
+
+    @Override
+    public String marshal(Response.Status status) throws Exception {
+        return status.name();
+    }
+
+    @Override
+    public Response.Status unmarshal(String statusAsString) throws Exception {
+        return Response.Status.valueOf(statusAsString);
+    }
+
+}
+</code></pre>
+            <p><strong>Note:</strong> For the mehod <code>getLocalizedMessage()</code> in class <code>APIErrorResponse</code> we need corresponding Properties-files. For
+                this purpose, however, we come back later.</p>
+            <p>Next, we want to think about, how we can transform all caught exceptions and all error situations, where we need to
+                generate our own exceptions to this generic response structure, which we defined above. In addition, we want the
+                business code from our business domain to know nearly nothing about this technical structure.</p>
+            <p>We want to encapsulate all technical error information and error messages. For that, an ENUM structure would be ideal.
+                This ENUM could have the following structure:</p>
+            <pre><code class="java">import javax.ws.rs.core.Response;
+
+public enum APIUserError {
+
+    U10001(Response.Status.BAD_REQUEST, &quot;no_valid_username&quot;),
+
+    U10002(Response.Status.NOT_FOUND, &quot;username_not_found&quot;);
+
+
+    private Response.Status status;
+
+    private String messageKey;
+
+
+    APIUserError(Response.Status status, String messageKey) {
+        this.status = status;
+        this.messageKey = messageKey;
+    }
+
+}
+</code></pre>
+            <p>Of course, wen can provide all errors in this one ENUM, but in bigger projects with several different business error
+                situations, this becomes unusable. Furthermore, we want the &quot;User-error-codes&quot; in the users domain and the
+                &quot;accounting-error-codes&quot; in the accounting domain (this is important in a domain-driven-design).</p>
+            <p>It is very important, that all Error-ENUMs have the same structure, so that they can be used in the same way. In order
+                to reach this goal, we define an interface:</p>
+            <pre><code class="java">import javax.ws.rs.core.Response;
+
+public interface APIError {
+
+    Response.Status getStatus();
+
+    String getErrorCode();
+
+    String getMessageKey();
+
+}
+</code></pre>
+            <p>And now, we let all Error-ENUM implement exactly this interface:</p>
+            <pre><code class="java">import javax.ws.rs.core.Response;
+
+public enum APIUserError implements APIError {
+
+    U10001(Response.Status.BAD_REQUEST, &quot;no_valid_username&quot;),
+
+    U10002(Response.Status.NOT_FOUND, &quot;username_not_found&quot;);
+
+
+    private Response.Status status;
+
+    private String messageKey;
+
+
+    APIUserError(Response.Status status, String messageKey) {
+        this.status = status;
+        this.messageKey = messageKey;
+    }
+
+
+    @Override
+    public Response.Status getStatus() {
+        return this.status;
+    }
+
+    @Override
+    public String getErrorCode() {
+        return this.name();
+    }
+
+    @Override
+    public String getMessageKey() {
+        return this.messageKey;
+    }
+}
+</code></pre>
+            <p>Now, we can put the concrete error ENUMs into the corresponding business domain. So, for example, we have an
+                APIUserError in the user-package and an APIAccountError in the accounting-package and so on.</p>
+            <p>Now, let's go back to our Properties-files for the localized error messages. We create two files here for the german and
+                the english messages (<code>APIUserError_de.properties</code>, <code>APIUserError_en.properties</code>). The files are created in the same
+                package as <code>APIUserError</code>. The file content is the well-known key-value-structure:</p>
+            <pre><code class="properties">APIUserError_de.properties:
+
+
+no_valid_username=Der \u00fcbergebene Benutzername ist ung\u00fcltig
+</code></pre>
+            <pre><code class="properties">APIUserError_en.properties
+
+
+no_valid_username=The provided username is invalid
+</code></pre>
+            <p>If we now look back again at our <code>APIErrorResponse</code> class, we will see the 'trick':<br />
+                Because all error-ENUMs implement the <code>APIError</code>-interface, they all can be generically given as parameter in the
+                constructor of <code>APIErrorResponse</code>. The additional parameter 'locale' controls the creation of the correct localized
+                error-message.<br />
+                <strong>Note:</strong> The current locale for this parameter can be determined from an ApplicationContext.</p>
+            <p>Ok, but one piece of the puzzle is still missing. We do not want to handle each exception separately, furthermore we
+                need to throw our own exceptions in suitable situations. So we can recap, which situations can occur:</p>
+            <ul>
+                <li>we have a concrete error situation in our business domain (e.g. &quot;Username not found&quot;) and we must inform the users of
+                    our API about it in the HTTP response</li>
+                <li>there is an exception from code of a third library</li>
+                <li>we have some 'unclear' situation, mostly a technical problem like an <code>IOException</code>, and we want to provide at least a
+                    proper error message and not an HTML-error-page from the webserver</li>
+            </ul>
+            <p>In order to get a consistent exception handling within our API, we need a consistent exception class. This exception
+                class should handle at least the three error situations mentioned before:</p>
+            <pre><code class="java">import javax.ws.rs.core.Response; import java.util.Locale;
+
+public class APIException extends RuntimeException {
+
+    public static final String HTTP_HEADER_X_ERROR = &quot;X-Error&quot;;
+    public static final String HTTP_HEADER_X_ERROR_CODE = &quot;X-Error-Code&quot;;
+
+
+    private Response httpResponse;
+
+
+    public APIException(APIError apiError, Locale locale) {
+        httpResponse = createHttpResponse(new APIErrorResponse(apiError, locale));
+    }
+
+    public APIException(Exception exception, Locale locale) {
+        httpResponse = createHttpResponse(new APIErrorResponse(exception, locale));
+    }
+
+    public APIException(Response.Status status,
+                        String errorCode,
+                        String messageKey,
+                        Locale locale) {
+        new APIErrorResponse(status, errorCode, messageKey, locale);
+    }
+
+
+    public Response getHttpResponse() {
+        return httpResponse;
+    }
+
+
+    private static Response createHttpResponse(APIErrorResponse response) {
+        return Response.status(response.getStatus()).entity(response)
+                .header(HTTP_HEADER_X_ERROR, response.getMessage())
+                .header(HTTP_HEADER_X_ERROR_CODE, response.getErrorCode()).build();
+    }
+
+}
+</code></pre>
+            <p>The main important facts of this <code>APIException</code> are:</p>
+            <ul>
+                <li>the <code>APIException</code> class inherits from <code>RuntimeException</code> so that we do not have to deal with checked exceptions or
+                    have to provide this technical exception in the 'throws clause' of the method signatures</li>
+                <li>each constructor of the class represents one of the above error situations</li>
+            </ul>
+            <p>Ok, now we have to extend the handling of exceptions within our ExceptionInterceptor:</p>
+            <pre><code class="java">import javax.inject.Inject;
+import javax.inject.Named;
+import javax.interceptor.AroundInvoke;
+import javax.interceptor.Interceptor;
+import javax.interceptor.InvocationContext;
+import javax.ws.rs.core.Response;
+import java.util.Locale;
+
+@Interceptor
+public class APIExceptionInterceptor {
+
+    @Inject
+    Locale locale;
+
+    @AroundInvoke
+    public Object handleException(InvocationContext context) {
+        Object proceedResponse;
+        try {
+            proceedResponse = context.proceed();
+        } catch (Exception ex) {
+            Response errorResponse;
+            if (ex instanceof APIException) {
+                errorResponse = ((APIException) ex).getHttpResponse();
+            } else if (ex.getCause() instanceof APIException) {
+                errorResponse = ((APIException) ex.getCause()).getHttpResponse();
+            } else {
+                errorResponse = new APIException(ex, locale).getHttpResponse();
+            }
+            return errorResponse;
+        }
+        return proceedResponse;
+    }
+}
+</code></pre>
+            <p><strong>Note:</strong> The property <code>java.util.Locale</code>is provided by a producer, so it can be injected here very easy (see
+                <code>@Produces</code>).</p>
+            <p>Want is going on here now? We check in the catch-clause, if we have an <code>APIException</code> and if so, we can immediately
+                return its HTTP-Response. It could be the case, that the APIException is wrapped within another exception, so we check
+                this situation as well.<br />
+                If there was thrown another exception, this exception is transformed into the <code>APIException</code> (in the second else-case).</p>
+            <p>In the following example, we want to generate a business error like 'Username not found':</p>
+            <pre><code class="java">@Stateless
+public class UserRepository {
+
+    @PersistenceContext
+    EntityManager entityManager;
+
+    @Inject
+    Locale locale;
+
+    public UserRepository() {}
+
+    public User getByUsername(String username) {
+        User user = entityManager.find(User.class, username);
+        if (user != null) {
+            return user;
+        }
+        throw new APIException(APIUserError.U10002, locale);
+    }
+
+}
+</code></pre>
+            <p>As seen here, it is very easy to create a localized exception with business error messages. The business code is not
+                polluted with technical aspects (this business code does not need to have any knowledge, that it is executed in a
+                REST-environment and that there have to be filled special properties of an error structure). These aspects are hidden
+                and encapsulated in the APIException and the APIError-ENUM.</p>
+            <h3><a href="#milestone-2" id="milestone-2" name="milestone-2"><span class="octicon octicon-link"></span>Milestone 2</a></h3>
+            <p>We have now constructed our central exception handling. In order to extend it, the only thing to do is to extend the
+                <code>APIError</code>-ENUM and the localized error messages in the properties files. Because the <code>APIError</code>-ENUMs are in the
+                corresponding domain-packages, we stay in the business domain even with the exception handling.</p>
+            <h2><a href="#integration-of-beanvalidation" id="integration-of-beanvalidation" name="integration-of-beanvalidation"><span class="octicon octicon-link"></span>Integration of BeanValidation</a></h2>
+            <p>In a REST API, we always need some kind of validation of the the provided properties. This could be the check for
+                mandatory fields or the validation of the dataformat of a property (this is very important especially for date/time
+                formats) or the format of an eMail-address. There are plenty of situations for validation.</p>
+            <p>Such checks are mainly business-checks or better, they are defined by business requirements. For example, a birthdate
+                ist mostly modelled with <code>java.util.Date</code>, but it needs only the date part and no hour, minutes or seconds. Or, if some
+                field is mandatory, that is defined only by business requirements... you don't see at the pure class structure, if some
+                age-field must be provided or not.</p>
+            <p>So, we would not maintain such checks and validations in our technical REST-API layer. It would be better to provide
+                these rules directly at the domain objects. Perhaps, these validations are already present at the domain objects in the
+                form of BeanValidation-annotations.<br />
+                A typical domain object could be modelled like this:</p>
+            <pre><code class="java">import javax.validation.constraints.NotNull;
+import javax.validation.constraints.Pattern;
+import javax.validation.constraints.Size;
+
+@XmlRootElement
+@XmlAccessorType(XmlAccessType.FIELD)
+public class User {
+
+    @NotNull
+    @Size(min = 2, max = 40)
+    private String username;
+
+    @NotNull
+    @Pattern(regexp = &quot;^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$&quot;)
+    private String email;
+
+
+    public UserDTO() {
+    }
+
+    // evtl. getter und setter
+ }
+</code></pre>
+            <p>We expect this domain object as parameter for our UsersResource in the HTTP-request:</p>
+            <pre><code class="java">@POST public Response registerUser(User userRequest) {
+    User managedUser = userRepository.register(userRequest);
+    URI uri = super.info.getAbsolutePathBuilder()
+        .path(&quot;/&quot; + managedUser.getEmail()).build();
+    return Response.created(uri).entity(managedUser).build();
+}
+</code></pre>
+            <p>Now, we have two possibilities to apply the BeanValidation on our User-object:</p>
+            <ul>
+                <li>@Valid-Annotation</li>
+                <li>programmatically</li>
+            </ul>
+            <p>The first possibility is to put the <code>@javax.validation.Valid</code>-annotation directly in front of the method parameter. In
+                this case, the BeanValidation is called on the User-object right after deserializing of the HTTP-payloads. The two
+                properties are then validated against the rules provided in the annotation (here the @NotNull, @Size and @Pattern-rules):</p>
+            <pre><code class="java">@POST
+public Response registerUser(@Valid User userRequest) {
+    // ...
+}
+</code></pre>
+            <p>The second possibility, namely invoking the BeanValidation programmatically, needs a bit more code, but is more flexible:</p>
+            <pre><code class="java">import javax.validation.ConstraintViolation;
+import javax.validation.ConstraintViolationException;
+import javax.validation.Validation;
+import javax.validation.Validator;
+import javax.validation.ValidatorFactory;
+
+public class ValidationController {
+
+    // ...
+
+    public static &lt;T&gt; void processBeanValidation(T entity) {
+        ValidatorFactory factory = Validation.buildDefaultValidatorFactory();
+        Validator validator = factory.getValidator();
+        Set&lt;ConstraintViolation&lt;T&gt;&gt; errors = validator.validate(entity);
+        if (!errors.isEmpty()) {
+            throw new ConstraintViolationException(errors);
+        }
+    }
+
+}
+</code></pre>
+            <p>In our <code>registerUser()</code>-method, we would invoke the validation with:</p>
+            <pre><code class="java">@POST
+public Response registerUser(User userRequest) {
+    // ...
+    ValidationController.processBeanValidation(user);
+}
+</code></pre>
+            <p>It depends on many aspects, which approach is finally chosen. With the programmatic way, you are overall more flexible.
+                But for simple entities and use-cases, the @Valid-annotation is already enough.</p>
+            <p>Now comes the exciting question: How do we combine our central exception handling with the construct of BeanValidation?
+                For that, we need to dive little deeper into the implementation of the BeanValidation. There, we will find the fact,
+                that there is thrown a <code>javax.validation.ConstraintViolationException</code>, if the validating rules (NotNull, Size and so
+                on) are violated.<br />
+                So, we can use an ExceptionMapper for this specific exception:</p>
+            <pre><code class="java">import javax.validation.ConstraintViolation;
+import javax.validation.ConstraintViolationException;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.GenericEntity;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Request;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.Variant;
+import javax.ws.rs.ext.ExceptionMapper;
+import javax.ws.rs.ext.Provider;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
+@Provider
+public class ConstraintViolationMapper
+                        implements ExceptionMapper&lt;ConstraintViolationException&gt; {
+
+    private static List&lt;Variant&gt; acceptableMediaTypes =
+            Variant.mediaTypes(MediaType.APPLICATION_JSON_TYPE,
+                               MediaType.APPLICATION_XML_TYPE).build();
+
+    @Context
+    protected Request request;
+
+
+    @Override
+    public Response toResponse(ConstraintViolationException ex) {
+        Set&lt;ConstraintViolation&lt;?&gt;&gt; constViolations = ex.getConstraintViolations();
+        List&lt;ConstraintViolationEntry&gt; errorList = new ArrayList&lt;&gt;();
+        for (ConstraintViolation&lt;?&gt; constraintViolation : constViolations) {
+            errorList.add(new ConstraintViolationEntry(constraintViolation));
+        }
+        GenericEntity&lt;List&lt;ConstraintViolationEntry&gt;&gt; entity =
+                new GenericEntity&lt;List&lt;ConstraintViolationEntry&gt;&gt;(errorList) {};
+        return Response.status(Response.Status.BAD_REQUEST)
+                .entity(entity).type(getNegotiatedMediaType()).build();
+    }
+
+    protected MediaType getNegotiatedMediaType() {
+        final Variant selectedMediaType = request.selectVariant(acceptableMediaTypes);
+        if (selectedMediaType == null) {
+            return MediaType.APPLICATION_JSON_TYPE;
+        }
+        return selectedMediaType.getMediaType();
+    }
+
+}
+</code></pre>
+            <p><strong>Note:</strong> The code around the <code>getNegotiatedMediaType()</code>-method can of course be outsourced. For simplicity, I listed it
+                here. The key-fact here is, that the HTTP-response type is determined from the MediaType of the HTTP-request. This means
+                that the response structure is always returned in the format that the client has supplied in its initial request.</p>
+            <p>A <code>ConstraintViolationException</code> always contains all occurring validation errors. So in the validation process, all
+                validations are processed first and then all violation errors are returned in a set of violations of the single
+                <code>ConstraintViolationException</code>.<br />
+                Now, we want to return all violations to the user in one response-structure. For that, we transform every single
+                ConstraintViolation in a new structure and return the complete violation-list as one entity as HTTP-response:</p>
+            <pre><code class="java">import javax.validation.ConstraintViolation;
+import javax.validation.Path;
+import javax.xml.bind.annotation.XmlAccessType;
+import javax.xml.bind.annotation.XmlAccessorType;
+import javax.xml.bind.annotation.XmlRootElement;
+import java.util.Iterator;
+
+@XmlRootElement
+@XmlAccessorType(XmlAccessType.FIELD)
+public class ConstraintViolationEntry {
+
+    private String fieldName;
+    private String wrongValue;
+    private String errorMessage;
+
+    public ConstraintViolationEntry() {}
+
+    public ConstraintViolationEntry(ConstraintViolation violation) {
+        Iterator&lt;Path.Node&gt; iterator = violation.getPropertyPath().iterator();
+        Path.Node currentNode = iterator.next();
+        String invalidValue = &quot;&quot;;
+        if (violation.getInvalidValue() != null) {
+            invalidValue = violation.getInvalidValue().toString();
+        }
+        this.fieldName = currentNode.getName();
+        this.wrongValue = invalidValue;
+        this.errorMessage = violation.getMessage();
+    }
+
+    public String getFieldName() {
+        return fieldName;
+    }
+
+    public String getWrongValue() {
+        return wrongValue;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+}
+</code></pre>
+            <p>However, in this case, the ExceptionInterceptor and the ConstraitViolationMapper interfere each other. Or other way
+                round: The ExceptionInterceptor catches the exception first, before the ConstraintViolationMapper can process the
+                exception.<br />
+                For this reason, we need to enhance our ExceptionInterceptor a little bit:</p>
+            <pre><code class="java">import javax.inject.Inject;
+import javax.inject.Named;
+import javax.interceptor.AroundInvoke;
+import javax.interceptor.Interceptor;
+import javax.interceptor.InvocationContext;
+import javax.validation.ConstraintViolationException;
+import javax.ws.rs.core.Response;
+import java.util.Locale;
+
+@Named
+@Interceptor
+public class RESTExceptionInterceptor {
+
+    @Inject
+    Locale locale;
+
+    @AroundInvoke
+    public Object handleException(InvocationContext context) {
+        Object proceedResponse;
+        try {
+            proceedResponse = context.proceed();
+        } catch (Exception ex) {
+            Response errorResponse;
+            if (ex instanceof APIException) {
+                errorResponse = ((APIException) ex).getHttpResponse();
+            } else if (ex.getCause() instanceof APIException) {
+                errorResponse = ((APIException) ex.getCause()).getHttpResponse();
+            } else if (ex.getCause() instanceof ConstraintViolationException) {
+                throw (ConstraintViolationException) ex.getCause();
+                // ---&gt; this exception is handled via the ConstraintViolationMapper
+            } else {
+                errorResponse = new APIException(ex, locale).getHttpResponse();
+            }
+            return errorResponse;
+        }
+        return proceedResponse;
+    }
+}
+</code></pre>
+            <p>The important part here is the additional &quot;else if&quot;-branch for the <code>ConstraintViolationException</code>. We extract the cause
+                of the caught exception, which is our <code>ConstraintViolationException</code> and <strong>rethrow</strong> exactly this
+                <code>ConstraintViolationException</code>. Now, the <code>ConstraintViolationMapper</code> can catch and handle the exception.</p>
+            <h2><a href="#summary" id="summary" name="summary"><span class="octicon octicon-link"></span>Summary</a></h2>
+            <p>We now have implemented a little framework, with which we can centralize the API-exception handling. An API-client
+                always can rely on a uniform error structure, and even he gets the localized error messages.<br />
+                In addition, all the exceptions, which are produced by BeanValidation, are also automatically handled and are
+                transformed to our uniform error structure. That means, we do not need to implement something special to handle
+                exceptions from BeanValidation and so we can focus on the business domain code.</p>
+            <p>The only maintenance required here is the extending of the <code>APIError</code>-ENUMs and the translating of the error message
+                within the Properties-files. If we need to throw some exception, we can use the <code>APIException</code>and and fill them with the
+                appropriate <code>APIError</code>-ENUM.</p>
+            <p>As mentioned earlier and as a possible outlook for increasing optimization, the ExceptionInterceptor can be used via
+                Interceptor-Binding (<a href="http://docs.oracle.com/javaee/7/api/javax/interceptor/InterceptorBinding.html">http://docs.oracle.com/javaee/7/api/javax/interceptor/InterceptorBinding.html</a>) instead of the
+                <code>@Interceptor</code>annotations.<br />
+                In addition, we can think about using readable error-constants like NO_USER_FOUND instead of the more technical one we
+                used currently (U10002).</p>
+
+
+
+            <footer class="site-footer">
+                <span class="site-footer-owner"><a href="https://ulrichcech.github.io">Ulrich's Developer Blog</a> is maintained by <a
+                        href="https://github.com/UlrichCech">UlrichCech</a>.</span>
+
+                <span class="site-footer-credits">This page was generated by <a href="https://pages.github.com">GitHub Pages</a> using the <a
+                        href="https://github.com/jasonlong/cayman-theme">Cayman theme</a> by <a
+                        href="https://twitter.com/jasonlong">Jason Long</a>.</span>
+            </footer>
+
+        </section>
+
+
+    </body>
+</html>
